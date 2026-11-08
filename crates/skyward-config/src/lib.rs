@@ -190,6 +190,13 @@ pub struct Wipe {
 /// The data partition, which the folders erasing takes in are in.
 const DATA: &str = "/data";
 
+/// Whether a path is one the phone has: from its root, with no step back up
+/// it and nothing after a closing slash. They are read as the phone's paths,
+/// not the computer's, so a computer with no such root reads them too.
+fn on_the_phone(path: &str) -> bool {
+    path.starts_with('/') && !path.ends_with('/') && !path.contains("//") && !path.split('/').any(|c| c == "." || c == "..")
+}
+
 /// The vibration motor's click, played through the kernel's force-feedback
 /// events: a waveform its driver keeps, or one made from samples at the
 /// motor's resonant frequency, which the driver plays as they are given.
@@ -290,11 +297,16 @@ pub struct Modules {
     /// source's modules.dep and load first.
     #[serde(default)]
     pub load: Vec<String>,
+    /// Modules the stock recovery's own init loads too early, before the
+    /// module they register with: they bind to nothing. Skyward unloads them
+    /// and loads them again, after what they depend on.
+    #[serde(default)]
+    pub reload: Vec<String>,
 }
 
 impl Default for Modules {
     fn default() -> Self {
-        Self { sources: default_module_sources(), load: Vec::new() }
+        Self { sources: default_module_sources(), load: Vec::new(), reload: Vec::new() }
     }
 }
 
@@ -478,10 +490,8 @@ impl DeviceConfig {
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: DeviceConfig = toml::from_str(text).context("parse device config")?;
         for log in &cfg.wipe.logs {
-            let path = Path::new(log);
-            let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
             ensure!(
-                path.is_absolute() && plain && path.starts_with(DATA) && path != Path::new(DATA),
+                on_the_phone(log) && log.starts_with("/data/"),
                 "[wipe] logs: {log} is not a folder inside {DATA}"
             );
         }
@@ -523,7 +533,7 @@ impl DeviceConfig {
                 "[haptics] names either a waveform the driver keeps or the file it says the motor's resonant frequency in"
             );
             if let Some(file) = &haptics.resonance {
-                ensure!(Path::new(file).is_absolute(), "[haptics] resonance: {file} is not an absolute path");
+                ensure!(on_the_phone(file), "[haptics] resonance: {file} is not an absolute path");
             }
             let Strength { lightest, strongest } = haptics.strength;
             ensure!(
@@ -533,9 +543,7 @@ impl DeviceConfig {
         }
         if let Some(logd) = &cfg.logd {
             for library in &logd.libraries {
-                let path = Path::new(library);
-                let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[logd] libraries: {library} is not an absolute path to a file");
+                ensure!(on_the_phone(library), "[logd] libraries: {library} is not an absolute path to a file");
             }
         }
         for owners in &cfg.owners {
@@ -545,9 +553,7 @@ impl DeviceConfig {
             ensure!(owners.mode <= 0o7777, "[[owners]] mode {:o} is not a file's mode", owners.mode);
             ensure!(!owners.paths.is_empty(), "[[owners]] for {}:{} names no file", owners.user, owners.group);
             for file in &owners.paths {
-                let path = Path::new(file);
-                let plain = path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-                ensure!(path.is_absolute() && plain && path.file_name().is_some(), "[[owners]] paths: {file} is not an absolute path to a file");
+                ensure!(on_the_phone(file), "[[owners]] paths: {file} is not an absolute path to a file");
             }
         }
         if let Some(stock) = &cfg.stock {

@@ -2245,6 +2245,7 @@ dependencies = [
  "evdev",
  "libc",
  "procfs",
+ "serde",
  "skyward-backup",
  "skyward-binder",
  "skyward-block",
@@ -2260,6 +2261,7 @@ dependencies = [
  "skyward-sys",
  "skyward-ui",
  "skyward-vab",
+ "toml",
  "ureq",
  "zip 8.6.0",
 ]

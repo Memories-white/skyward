@@ -10,6 +10,7 @@ use crate::pty;
 use crate::readings::{Reading, Readings};
 use crate::secure;
 use crate::services;
+use crate::settings::Settings;
 use crate::updates;
 use crate::wipe::{self, Eraser, Step};
 use crate::wlan;
@@ -166,6 +167,21 @@ fn normal_max(max: u32) -> Result<u32> {
 }
 
 /// Leave recovery for the chosen target.
+fn save_settings(settings: &Settings) {
+    if let Err(e) = settings.save() {
+        let _ = skyward_sys::kmsg(&format!("could not save recovery settings: {e:#}"));
+    }
+}
+
+fn play_haptic(motor: &mut Option<Haptics>, strength: f32) {
+    if let Some(haptics) = motor {
+        if let Err(e) = haptics.click(strength) {
+            let _ = skyward_sys::kmsg(&format!("haptics disabled after playback failed: {e:#}"));
+            *motor = None;
+        }
+    }
+}
+
 fn power(target: Target) -> Result<()> {
     skyward_sys::power(match target {
         Target::System => Power::System,
@@ -1028,7 +1044,13 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut touch_known = false;
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
-    let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
+    let mut haptics = match cfg.haptics.as_ref().map(Haptics::open).transpose() {
+        Ok(motor) => motor,
+        Err(e) => {
+            let _ = skyward_sys::kmsg(&format!("haptics unavailable: {e:#}"));
+            None
+        }
+    };
     let mut backlight = Backlight::open()?;
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
@@ -1052,6 +1074,11 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         app.state.lang = Lang::for_locale(locale)?;
         skyward_sys::kmsg(&format!("the pages speak {:?}, for the locale {locale}", app.state.lang))?;
     }
+    if let Err(e) = Settings::load(&mut app.state) {
+        let _ = skyward_sys::kmsg(&format!("could not load recovery settings: {e:#}"));
+    }
+    let mut last_settings = Settings::from_state(&app.state);
+    let mut settings_due = None;
     // The home page tells of a restart into the slot the system does not
     // run from now: an update or a switch left for the next boot.
     if info.slot.is_some() {
@@ -1258,6 +1285,17 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut drive_at = Instant::now();
     loop {
         let now = monotonic_ms();
+        let settings = Settings::from_state(&app.state);
+        if settings != last_settings {
+            last_settings = settings;
+            settings_due = Some(now + 500);
+        }
+        if settings_due.is_some_and(|due| now >= due || leave_at.is_some())
+            && merger.is_none() && installer.is_none() && eraser.is_none()
+        {
+            settings_due = None;
+            save_settings(&last_settings);
+        }
         if leave_at.is_some_and(|at| now >= at) {
             leave_at = None;
             power(leave)?;
@@ -1272,9 +1310,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         for fx in app.tick(now) {
             match fx {
                 Effect::Haptic => {
-                    if let Some(h) = &mut haptics {
-                        h.click(app.state.vibration)?;
-                    }
+                    play_haptic(&mut haptics, app.state.vibration);
                 }
                 other => unreachable!("time passing asks for nothing but a tap of the motor, not {other:?}"),
             }
@@ -1807,6 +1843,12 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                     // Leaving is the user's answer to whatever the request
                     // still kept in misc asked.
                     Effect::Reboot(target) => {
+                        let settings = Settings::from_state(&app.state);
+                        if (settings_due.is_some() || settings != last_settings)
+                            && merger.is_none() && installer.is_none() && eraser.is_none()
+                        {
+                            save_settings(&settings);
+                        }
                         if kept {
                             bcb::clear(&misc)?;
                             kept = false;
@@ -1887,9 +1929,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                         }
                     }
                     Effect::Haptic => {
-                        if let Some(h) = &mut haptics {
-                            h.click(app.state.vibration)?;
-                        }
+                        play_haptic(&mut haptics, app.state.vibration);
                     }
                     // The panel shows the last frame drawn, which is what is
                     // saved; one that cannot be is the page's to report.

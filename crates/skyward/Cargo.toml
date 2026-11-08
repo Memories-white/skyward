@@ -21,6 +21,8 @@ skyward-sys = { path = "../skyward-sys" }
 skyward-lp = { path = "../skyward-lp" }
 
 [target.'cfg(target_os = "android")'.dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
 evdev = "0.13.2"
 skyward-backup = { path = "../skyward-backup" }
 skyward-binder = { path = "../skyward-binder" }
